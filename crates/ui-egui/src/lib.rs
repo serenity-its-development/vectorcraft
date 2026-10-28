@@ -35,6 +35,7 @@ pub mod graphics;
 pub mod i18n;
 pub mod icon_data;
 pub mod icons;
+pub mod host_commands;
 pub mod io;
 pub mod keymap;
 pub mod menus;

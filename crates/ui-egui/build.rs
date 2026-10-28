@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use serde_json::Value;
 
 fn main() {
+    copy_catalogs();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contributors");
     let json = read(&dir.join("contributors.json"), "the About window shows no contributors", |t| {
         serde_json::from_str::<Value>(t).map_err(|e| e.to_string())
@@ -29,6 +30,45 @@ fn main() {
     }
     if let Err(e) = std::fs::write(&out, src) {
         println!("cargo::warning=writing {}: {e}", out.display());
+    }
+}
+
+/// The translation catalogs (`src/i18n/*.tsv`) as `i18n/mod.rs` embeds them, copied to `OUT_DIR/i18n/`. OneOS's browser build embeds
+/// the languages named in `VECTORCRAFT_LOCALES` (comma-separated codes, "de,es,pt-br"): every catalog is embedded as text (~7 MB of
+/// source), and a language left out reads as English (its catalog is empty). Unset, every language is embedded, as before.
+fn copy_catalogs() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/i18n");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default()).join("i18n");
+    println!("cargo::rerun-if-changed={}", src.display());
+    println!("cargo::rerun-if-env-changed=VECTORCRAFT_LOCALES");
+    let only: Option<Vec<String>> =
+        std::env::var("VECTORCRAFT_LOCALES").ok().map(|v| v.split(',').map(|c| c.trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect());
+    if let Err(e) = std::fs::create_dir_all(&out) {
+        println!("cargo::error=creating {}: {e}", out.display());
+        return;
+    }
+    let Ok(dir) = std::fs::read_dir(&src) else {
+        println!("cargo::error=reading {}", src.display());
+        return;
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(".tsv")) else { continue };
+        println!("cargo::rerun-if-changed={}", path.display());
+        let code = name.trim_end_matches(".tsv").to_ascii_lowercase();
+        let text = if only.as_ref().is_none_or(|o| o.contains(&code)) {
+            std::fs::read_to_string(&path).unwrap_or_default()
+        } else {
+            format!("# {code}: not embedded in this build (VECTORCRAFT_LOCALES); the interface reads as English.\n")
+        };
+        // Unchanged output keeps its mtime, so the next build doesn't compile this crate again.
+        let to = out.join(name);
+        if std::fs::read_to_string(&to).is_ok_and(|old| old == text) {
+            continue;
+        }
+        if let Err(e) = std::fs::write(&to, text) {
+            println!("cargo::error=writing {}: {e}", to.display());
+        }
     }
 }
 

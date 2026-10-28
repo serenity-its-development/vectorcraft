@@ -16,6 +16,7 @@ use vectorcraft_ui_egui::print::{PrintJob, PrintService, Printer};
 use vectorcraft_ui_egui::{Services, VectorcraftApp};
 use wasm_bindgen::JsCast as _;
 
+use crate::host;
 use crate::locks::WebLocks;
 use crate::pencil::SharedPointers;
 
@@ -55,6 +56,39 @@ struct Host {
     locks: Option<WebLocks>,
     /// Graphics restarts so far.
     restarts: u32,
+    /// The OneOS host bridge, when the page is framed by it (`crate::host`): kept across graphics restarts.
+    framed: Option<Framed>,
+}
+
+/// What the page keeps of the OneOS host bridge: the bridge, and what the host sent that the next frame acts on.
+#[derive(Clone)]
+struct Framed {
+    bridge: host::Bridge,
+    inbox: host::HostInbox,
+    notices: host::HostNotices,
+    runs: host::HostRuns,
+    /// The running app's context, which a host message wakes.
+    wake: host::Wake,
+}
+
+impl Framed {
+    fn start(bridge: host::Bridge) -> Self {
+        let framed = Self {
+            bridge,
+            inbox: host::HostInbox::default(),
+            notices: host::HostNotices::default(),
+            runs: host::HostRuns::default(),
+            wake: host::Wake::default(),
+        };
+        framed.bridge.listen(framed.inbox.clone(), framed.notices.clone(), framed.runs.clone(), framed.wake.clone());
+        framed
+    }
+}
+
+/// The OneOS hand-over of the progressive open, per running app (`craft:opened`, the first view's place, `craft:viewed`).
+struct Handover {
+    state: crate::handoff::Handoff<Option<u64>>,
+    dirty: Box<dyn FnMut(bool)>,
 }
 
 pub fn start() {
@@ -79,6 +113,7 @@ pub fn start() {
             pointers: SharedPointers::default(),
             locks,
             restarts: 0,
+            framed: host::Bridge::new().map(Framed::start),
         };
         track_paste(&host.pasted);
         run(host, canvas, None).await;
@@ -101,6 +136,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
     let slot = Rc::new(RefCell::new(moving.map(|m| m.app)));
     let (runner, taken, page) = (host.runner.clone(), slot.clone(), canvas.clone());
     let (pointers, pen_canvas) = (host.pointers.clone(), canvas.clone());
+    let failed_framed = host.framed.clone();
     let result = runner
         .start(
             canvas,
@@ -116,7 +152,11 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     rs.device.set_device_lost_callback(move |reason, msg| loss.report(&ctx, format!("{reason:?}: {msg}")));
                 }
                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
-                let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone());
+                let services =
+                    services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone(), host.framed.as_ref().map(|f| &f.bridge));
+                if let Some(framed) = &host.framed {
+                    *framed.wake.borrow_mut() = Some(ctx.clone());
+                }
                 let app = match taken.borrow_mut().take() {
                     Some(mut app) => {
                         // The old services asked the old context for frames.
@@ -135,7 +175,12 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         VectorcraftApp::new(Session::new(), services).with_control(control_rx)
                     }
                 };
-                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss }))
+                let handover = host.framed.as_ref().map(|f| Handover { state: crate::handoff::Handoff::new(), dirty: f.bridge.dirty_fn() });
+                if let Some(framed) = &host.framed {
+                    // The editor is up (again): the host may send its file now.
+                    framed.bridge.post_ready();
+                }
+                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss, handover }))
             }),
         )
         .await;
@@ -148,7 +193,12 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                 el.remove();
             }
         }
-        (Err(e), None) => notice(&[&format!("VectorCraft failed to start: {}", js_err(e)), "A browser with WebGPU or WebGL2 is required."]),
+        (Err(e), None) => {
+            if let Some(framed) = &failed_framed {
+                framed.bridge.post_failed(&js_err(e.clone()));
+            }
+            notice(&[&format!("VectorCraft failed to start: {}", js_err(e)), "A browser with WebGPU or WebGL2 is required."])
+        }
         (Err(e), Some(kept)) => {
             log::error!("vectorcraft-web: couldn't restart the graphics: {}", js_err(e));
             give_up(slot.borrow_mut().take(), kept);
@@ -335,6 +385,8 @@ struct WebShell {
     host: Host,
     canvas: web_sys::HtmlCanvasElement,
     loss: GraphicsLoss,
+    /// The progressive open's hand-over to the OneOS host, when framed.
+    handover: Option<Handover>,
 }
 
 impl WebShell {
@@ -365,6 +417,9 @@ impl eframe::App for WebShell {
             self.restart(&why);
         }
         let Some(app) = &mut self.app else { return };
+        if let (Some(framed), Some(handover)) = (&self.host.framed, &mut self.handover) {
+            host_before(framed, handover, app);
+        }
         let pasted = self.host.pasted.borrow_mut().flavour.take();
         if let Some((f, held)) = pasted {
             app.paste_from_host(ctx, f, held);
@@ -395,6 +450,9 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
+        if let (Some(framed), Some(handover)) = (&self.host.framed, &mut self.handover) {
+            host_after(framed, handover, app, ctx);
+        }
         crate::api::poll_replies();
     }
 
@@ -413,7 +471,52 @@ impl eframe::App for WebShell {
     }
 }
 
-fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Option<WebLocks>) -> Services {
+/// Before the app's own pass: open what the host sent, show what it refused, run the assistant's runs, and note a new open for the hand-over.
+fn host_before(framed: &Framed, handover: &mut Handover, app: &mut VectorcraftApp) {
+    let files: Vec<(String, Vec<u8>)> = framed.inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    handover.state.before(&framed.bridge, app.shown_document());
+    for (name, bytes) in files {
+        if let Err(e) = app.open_host_file(&name, &bytes) {
+            vectorcraft_ui_egui::io::report_open_error(app, &name, &e);
+        }
+    }
+    let notices: Vec<String> = framed.notices.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    for message in notices {
+        app.status(message);
+    }
+    let runs: Vec<host::HostRun> = framed.runs.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    for run in runs {
+        let outcome = if run.method == "command.batch" {
+            app.run_command_batch(&run.params)
+        } else {
+            Err(format!("unknown-method: this editor does not take `{}`", run.method))
+        };
+        framed.bridge.answer(&run.id, outcome);
+    }
+}
+
+/// After the app's own pass: the hand-over and the unsaved flag.
+fn host_after(framed: &Framed, handover: &mut Handover, app: &mut VectorcraftApp, ctx: &egui::Context) {
+    let shown = app.shown_document();
+    let wanted = handover.state.after(&framed.bridge, shown, |view| {
+        if view.scrolled() {
+            app.open_at_first_view(vectorcraft_ui_egui::host_commands::FirstViewPlace {
+                scroll_left: view.scroll_left,
+                scroll_top: view.scroll_top,
+                scroll_width: view.scroll_width,
+                scroll_height: view.scroll_height,
+                client_width: view.client_width,
+                client_height: view.client_height,
+            });
+        }
+    });
+    (handover.dirty)(app.host_dirty());
+    if wanted {
+        ctx.request_repaint();
+    }
+}
+
+fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Option<WebLocks>, host: Option<&host::Bridge>) -> Services {
     let open_inbox = inbox.clone();
     let picked = place_inbox.clone();
     let place_ctx = ctx.clone();
@@ -457,8 +560,12 @@ fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Op
         })),
         // Sample Color from Screen: the browser's EyeDropper, where it has one.
         screen_color,
-        // A download that couldn't be started fails the save or export it is for (#1693).
-        download: Some(Box::new(|name: &str, bytes: &[u8]| download(name, bytes).inspect_err(|e| log::error!("download of {name} failed: {e}")))),
+        // A download that couldn't be started fails the save or export it is for (#1693). Framed by OneOS every byte out goes to the host
+        // (a new version of the opened file, or a copy under another name) and nothing is downloaded.
+        download: Some(match host {
+            Some(bridge) => bridge.save_fn(),
+            None => Box::new(|name: &str, bytes: &[u8]| download(name, bytes).inspect_err(|e| log::error!("download of {name} failed: {e}"))),
+        }),
         inbox: Some(inbox),
         recovery_store: Some(Arc::new(BrowserStore { locks })),
         // File → Print: the browser's print dialog.

@@ -4819,6 +4819,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vectorcraft-host-node"
+version = "0.16.0"
+dependencies = [
+ "serde_json",
+ "vectorcraft-engine",
+ "vectorcraft-format",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "vectorcraft-mcp"
 version = "0.16.0"
 dependencies = [

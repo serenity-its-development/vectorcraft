@@ -20,6 +20,10 @@
 mod api;
 #[cfg(target_arch = "wasm32")]
 mod fonts;
+#[cfg(any(target_arch = "wasm32", test))]
+mod handoff;
+#[cfg(target_arch = "wasm32")]
+mod host;
 #[cfg(target_arch = "wasm32")]
 mod locks;
 #[cfg(any(target_arch = "wasm32", test))]

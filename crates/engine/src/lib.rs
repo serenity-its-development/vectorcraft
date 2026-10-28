@@ -9,6 +9,7 @@
 pub mod cmd;
 pub mod file_access;
 pub mod guard;
+pub mod host_commands;
 pub mod inspect;
 pub mod journal;
 pub mod link_watch;
