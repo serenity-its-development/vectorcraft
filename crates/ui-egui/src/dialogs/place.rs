@@ -3,7 +3,7 @@
 //! object) or loads the place cursor with several ([`crate::place::confirm`]).
 //!
 //! Fields: `files` (`[{path} | {name}]`), `link`, `template`, `replace`, and `__replace` (one file
-//! and one selected object: Replace applies), `__documents` and `__others` (VectorCraft documents
+//! and one selected object: Replace applies), `__documents` and `__others` (Vector documents
 //! from files are picked, other files are: what Link's tooltip explains), `__info` (a line per
 //! file; on the desktop the lines are read off the UI thread and are empty until they are read,
 //! [`crate::place::fill_lines`]).
@@ -87,7 +87,7 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     false
 }
 
-/// Link's tooltip: what it does for the files picked (images, VectorCraft documents, or both), a
+/// Link's tooltip: what it does for the files picked (images, Vector documents, or both), a
 /// line each.
 pub(crate) fn link_tip(d: &Dialog) -> String {
     let lines = match (d.bool("__documents"), d.bool("__others")) {
@@ -100,7 +100,7 @@ pub(crate) fn link_tip(d: &Dialog) -> String {
         (true, true) => {
             vec![
                 tl!("Images: link to the file instead of only embedding it."),
-                tl!("VectorCraft documents: one locked object, updated when the file changes."),
+                tl!("Vector documents: one locked object, updated when the file changes."),
             ]
         }
         _ => vec![tl!("Keep a link to an image file instead of only embedding it")],

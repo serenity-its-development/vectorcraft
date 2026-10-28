@@ -176,7 +176,7 @@ mod tests {
         ] {
             assert!(text.contains(label), "{label} in {text}");
         }
-        // The defaults: VectorCraft's Shape Builder as it works without the dialog.
+        // The defaults: Vector's Shape Builder as it works without the dialog.
         let d = app.ui.dialog.as_mut().unwrap();
         assert_eq!(
             (d.bool("openFilledAsClosed"), d.str("pickColorFrom"), d.bool("cursorSwatchPreview"), d.str("selection"), d.bool("highlightFill")),

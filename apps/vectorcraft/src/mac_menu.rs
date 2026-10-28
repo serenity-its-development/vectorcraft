@@ -1,14 +1,14 @@
 //! The macOS menu bar, through muda (Tauri's menu crate: AppKit menus behind a safe API, no GTK
-//! with default features off). The menus, their Mac layout and how their keys reach VectorCraft
+//! with default features off). The menus, their Mac layout and how their keys reach Vector
 //! are in `vectorcraft_ui_egui::native_menu`; this file only builds and updates the `NSMenu`s.
 //!
 //! - Item ids are the items' places (`vc12`, depth first): one command can run from several items
-//!   (each language of VectorCraft › Language is `app.language` with its own code).
+//!   (each language of Vector › Language is `app.language` with its own code).
 //! - A structure change (a recent file added, the language or a shortcut changed) rebuilds the
 //!   menu; labels, enabled and checked are updated in place.
 //! - A chosen item is a click or a key equivalent: AppKit's current event says which. A key
 //!   equivalent goes back to egui as the key press that was made (the event's modifiers, not the
-//!   item's: AppKit may match ⌘R to a ⇧⌘R item), so VectorCraft's key rules still apply.
+//!   item's: AppKit may match ⌘R to a ⇧⌘R item), so Vector's key rules still apply.
 //! - Hide and Hide Others are items of ours calling `NSApplication`: AppKit's own always take ⌘H
 //!   (View › Hide Edges) and ⌥⌘H.
 

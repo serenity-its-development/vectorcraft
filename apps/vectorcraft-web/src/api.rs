@@ -1,7 +1,7 @@
 //! `window.vectorcraft`: the control channel for the page, as promises.
 //!
 //! The same JSON methods as the desktop control server (`docs/control-protocol.md`), so an agent
-//! driving VectorCraft in a browser tab (or an `<iframe>` in another app) uses the same commands as
+//! driving Vector in a browser tab (or an `<iframe>` in another app) uses the same commands as
 //! the CLI and the MCP server:
 //!
 //! ```js
@@ -106,7 +106,7 @@ fn request(method: &str, params: Value) -> js_sys::Promise {
         if sent {
             WAITING.with(|w| w.borrow_mut().push((rx, resolve, reject)));
         } else {
-            let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new("VectorCraft is not running yet"));
+            let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new("Vector is not running yet"));
         }
     });
     repaint();

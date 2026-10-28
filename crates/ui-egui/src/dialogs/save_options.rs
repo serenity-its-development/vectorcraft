@@ -5,7 +5,7 @@
 //!
 //! Fields: `__action` (the save command it finishes), `__pick` (file name and format
 //! editable), `path`, `format`, and one field per option (agents set them with `ui.dialog.set`).
-//! Native and `.ai` files show their save options (VectorCraft Options after Save As): each
+//! Native and `.ai` files show their save options (Vector Options after Save As): each
 //! artboard to a separate file, with `all` (true: every artboard) or `range`, Include Linked Files,
 //! Embed ICC Profiles, Create PDF-Compatible File and Use Compression. A `.ai` file's Version comes
 //! first: PDF-compatible, or legacy version 7 (`aiVersion: "7"`, a file per artboard), which takes
@@ -544,7 +544,7 @@ mod tests {
         // The save panel offers every save format, the document's own first.
         let pick = &picks.borrow()[0];
         let labels: Vec<&str> = pick.filters.iter().map(|f| f.0.as_str()).collect();
-        assert_eq!(labels, ["VectorCraft", "VectorCraft Template", "PDF", "SVG", "SVG Compressed", "PDF-compatible .ai"]);
+        assert_eq!(labels, ["Vector", "Vector Template", "PDF", "SVG", "SVG Compressed", "PDF-compatible .ai"]);
         assert_eq!(pick.name, "Untitled-1.vectorcraft");
         let d = dialog(&app);
         assert_eq!((d.kind.as_str(), d.str("path").as_str(), d.str("mode").as_str()), ("svgOptions", "art.svg", "save"));
@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(pick.folder.as_deref().map(std::path::Path::new), Some(folder.as_path()));
         assert_eq!(
             pick.filters,
-            crate::FilePick::filters([("VectorCraft Template", &["vctemplate"][..]), ("PDF-compatible .ait template", &["ait"][..])])
+            crate::FilePick::filters([("Vector Template", &["vctemplate"][..]), ("PDF-compatible .ait template", &["ait"][..])])
         );
         assert_eq!(written.borrow()[1].0, "copy.vctemplate", "the picked name, its extension replaced with the template's");
     }
@@ -719,7 +719,7 @@ mod tests {
         let (mut app, written) = web();
         app.run("file.saveAsTemplate", json!({})).unwrap();
         assert_eq!((heading(dialog(&app)).as_str(), dialog(&app).str("format").as_str()), ("Save as Template", "template"));
-        assert_eq!(template_labels(), ["VectorCraft Template", "PDF-compatible .ait template"]);
+        assert_eq!(template_labels(), ["Vector Template", "PDF-compatible .ait template"]);
         frame(&mut app, false);
         let mut d = app.ui.dialog.take().unwrap();
         switch_format(&mut app, &mut d, "ait");

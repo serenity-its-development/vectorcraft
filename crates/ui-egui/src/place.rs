@@ -208,7 +208,7 @@ fn open_dialog(app: &mut VectorcraftApp, files: Vec<Value>) {
     ));
 }
 
-/// Is dialog file entry `file` a VectorCraft document on disk (what Link places as one locked
+/// Is dialog file entry `file` a Vector document on disk (what Link places as one locked
 /// object), or a PDF or `.ai` file on disk? A `.ai` saved without PDF compatibility is PostScript,
 /// which `file.place` embeds whether Link is on or not.
 fn is_vectorcraft_file(app: &VectorcraftApp, file: &Value) -> bool {

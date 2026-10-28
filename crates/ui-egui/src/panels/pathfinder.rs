@@ -1,4 +1,4 @@
-//! Pathfinder panel: Shape Modes (+ Expand) and Pathfinders, with icons drawn for VectorCraft.
+//! Pathfinder panel: Shape Modes (+ Expand) and Pathfinders, with icons drawn for Vector.
 
 use egui::Ui;
 use serde_json::json;

@@ -1,10 +1,10 @@
-//! VectorCraft's keymap on [`craft_keymap`]: the catalogue of everything a shortcut can run, the
-//! bridge between VectorCraft's chord spellings and the crate's, and the stored form of the
+//! Vector's keymap on [`craft_keymap`]: the catalogue of everything a shortcut can run, the
+//! bridge between Vector's chord spellings and the crate's, and the stored form of the
 //! user's overrides.
 //!
-//! Entry keys are VectorCraft's everywhere outside this module: a command id, `tool:<id>`, or
+//! Entry keys are Vector's everywhere outside this module: a command id, `tool:<id>`, or
 //! `panel:<id>` for the Window menu item showing a panel (`window.panel {panel}`). Chord texts
-//! outside it are VectorCraft's too (`Cmd+Shift+]`, `Comma`, `Period`, `~` for the backtick key,
+//! outside it are Vector's too (`Cmd+Shift+]`, `Comma`, `Period`, `~` for the backtick key,
 //! `=` for Plus with modifiers). Inside an [`Overrides`] keys and texts are the crate's.
 
 use std::sync::{OnceLock, RwLock};
@@ -64,7 +64,7 @@ pub fn entry_of_stored(key: &str) -> String {
 
 // ---------- chord texts ----------
 
-/// Reads VectorCraft chord text. `+` and `=` are one key: Plus alone, Equals with modifiers.
+/// Reads Vector chord text. `+` and `=` are one key: Plus alone, Equals with modifiers.
 pub fn vc_chord(text: &str) -> Option<Chord> {
     let sc = crate::shortcuts::parse(text.trim())?;
     let key = Key::from_egui(sc.logical_key)?;
@@ -78,19 +78,19 @@ pub fn vc_chord(text: &str) -> Option<Chord> {
     Some(Chord::new(mods, key))
 }
 
-/// VectorCraft's text of a chord, as `shortcut_editor::format` writes it.
+/// Vector's text of a chord, as `shortcut_editor::format` writes it.
 pub fn vc_format(chord: &Chord) -> String {
     let m = chord.mods;
     let mods = egui::Modifiers { alt: m.alt, ctrl: m.ctrl, shift: m.shift, mac_cmd: false, command: m.cmd };
     shortcut_editor::format(&egui::KeyboardShortcut::new(mods, chord.key.to_egui()))
 }
 
-/// VectorCraft's text of a binding; a scoped or double binding (hand-written) keeps the crate's.
+/// Vector's text of a binding; a scoped or double binding (hand-written) keeps the crate's.
 pub fn binding_text(b: &Binding) -> String {
     if b.scope.is_none() && !b.trigger.double { vc_format(&b.trigger.chord) } else { b.to_string() }
 }
 
-/// VectorCraft text → the crate's. Text both read as one chord stays as written (`Comma`,
+/// Vector text → the crate's. Text both read as one chord stays as written (`Comma`,
 /// `Ctrl+Cmd+H`), so it is saved back as the user wrote it; text neither reads is kept for
 /// `Keymap::problems`.
 pub fn vc_to_crate(text: &str) -> String {
@@ -104,7 +104,7 @@ pub fn vc_to_crate(text: &str) -> String {
     }
 }
 
-/// The crate's text → VectorCraft's. The crate's canonical text is rewritten; other text is
+/// The crate's text → Vector's. The crate's canonical text is rewritten; other text is
 /// what [`vc_to_crate`] kept as written, or text that does not parse.
 pub fn crate_to_vc(text: &str) -> String {
     match Binding::parse(text) {
@@ -237,14 +237,14 @@ pub fn effective_with(km: &Keymap, key: &str) -> Option<String> {
 
 // ---------- overrides ----------
 
-/// Sets an entry's shortcut in VectorCraft's terms: `""` for none.
+/// Sets an entry's shortcut in Vector's terms: `""` for none.
 pub fn set_override(overrides: &mut Overrides, key: &str, text: &str) {
     let texts = if text.trim().is_empty() { vec![] } else { vec![vc_to_crate(text)] };
     // Only an over-long key or text is refused; such an entry could not be stored anyway.
     let _ = overrides.insert(stored_key(key), texts);
 }
 
-/// Overrides holding `(entry key, shortcut)` pairs in VectorCraft's terms.
+/// Overrides holding `(entry key, shortcut)` pairs in Vector's terms.
 pub fn overrides_from(pairs: &[(&str, &str)]) -> Overrides {
     let mut out = Overrides::new();
     for (k, t) in pairs {
@@ -253,7 +253,7 @@ pub fn overrides_from(pairs: &[(&str, &str)]) -> Overrides {
     out
 }
 
-/// An entry's stored shortcut in VectorCraft's terms (`""` for none), when it has an override.
+/// An entry's stored shortcut in Vector's terms (`""` for none), when it has an override.
 pub fn override_text(overrides: &Overrides, key: &str) -> Option<String> {
     overrides.get(&stored_key(key)).map(|t| t.first().map(|t| crate_to_vc(t)).unwrap_or_default())
 }
@@ -262,8 +262,8 @@ pub fn has_override(overrides: &Overrides, key: &str) -> bool {
     overrides.get(&stored_key(key)).is_some()
 }
 
-/// Serde for [`Overrides`] in VectorCraft's own form, which every earlier version reads: a map
-/// of entry key → one shortcut text (`""` for none), with `panel:` keys and VectorCraft's
+/// Serde for [`Overrides`] in Vector's own form, which every earlier version reads: a map
+/// of entry key → one shortcut text (`""` for none), with `panel:` keys and Vector's
 /// spellings. Loading never fails: what cannot be used is dropped or kept for
 /// `Keymap::problems`, and only an entry's first text is kept.
 pub mod stored {

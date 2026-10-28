@@ -1,4 +1,4 @@
-//! VectorCraft in the browser.
+//! Vector in the browser.
 //!
 //! Runs the same [`vectorcraft_ui_egui::VectorcraftApp`] as the desktop app through eframe's web
 //! runner (wgpu: WebGPU where available, WebGL2 otherwise). Build with `trunk build --release`
