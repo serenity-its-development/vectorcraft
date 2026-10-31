@@ -702,10 +702,16 @@ impl Ctx {
             .collect();
         let under = stroke_under(&mut cells, label, warnings);
 
-        let anchor_of = |i: usize| match cs.chars.get(i).and_then(|c| self.css.prop(c.1, "text-anchor")).as_deref() {
-            Some("middle") => 0.5,
-            Some("end") => 1.0,
-            _ => 0.0,
+        // `start` and `end` follow the text's direction: a right-to-left chunk starts at its right end.
+        let anchor_of = |i: usize| {
+            let rtl = cs.chars.get(i).and_then(|c| self.css.prop(c.1, "direction")).is_some_and(|d| d.trim() == "rtl");
+            match cs.chars.get(i).and_then(|c| self.css.prop(c.1, "text-anchor")).as_deref().map(str::trim) {
+                Some("middle") => 0.5,
+                Some("end") if rtl => 0.0,
+                Some("end") => 1.0,
+                _ if rtl => 1.0,
+                _ => 0.0,
+            }
         };
         let anchor = anchor_of(0);
         let path = cs.path.and_then(|tp| match self.text_path(xml, tp) {

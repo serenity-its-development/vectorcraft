@@ -980,15 +980,61 @@ fn outline_text_writes_glyph_paths() {
     assert!(b.width() > 80.0 && b.x0 >= 9.0, "{b:?}");
 }
 
+/// Corpus V1 (svg/text-text-bidi-reordering.svg): bidirectional text was outlined on SVG save,
+/// so after a round trip there was no text left to edit or search.
 #[test]
-fn bidirectional_svg_export_preserves_shaped_appearance_as_outlines() {
-    let t = TextObject::point(Point::new(10.0, 40.0), "שלום Rust 123 مرحبا", CharStyle::default());
-    let expected =
-        vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &t).glyphs.iter().filter(|g| !g.outline.elements().is_empty()).count();
-    assert!(expected > 0);
+fn bidirectional_svg_export_keeps_live_text_in_logical_order() {
+    let text = "שלום Rust 123 مرحبا";
+    let t = TextObject::point(Point::new(10.0, 40.0), text, CharStyle::default());
+    let lay = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &t);
+    let line = lay.lines[0].clone();
     let d = doc_with(vec![Node::new(NodeId(100), NodeKind::Text(Box::new(t)))]);
-    let svg = export(&d, &ExportOptions::default());
-    assert!(!svg.contains("<text"), "visual clusters must not be emitted as reversed live text");
-    assert!(svg.contains("<path"));
-    assert!(import(&svg).is_ok());
+    let (svg, warnings) = vectorcraft_svg::export_with_report(&d, &ExportOptions::default());
+    assert!(svg.contains("<text"), "{svg}");
+    assert!(svg.contains(text), "the line is written whole, in logical order, for the viewer's bidi: {svg}");
+    assert!(!warnings.iter().any(|w| w.contains("outlined")), "{warnings:?}");
+    // Its first strong character is Hebrew: a right-to-left line, written as one.
+    assert_eq!(line.rtl, svg.contains("direction=\"rtl\""), "{svg}");
+    let back = import(&svg).unwrap();
+    let texts: Vec<&TextObject> = art(&back).iter().filter_map(|n| if let NodeKind::Text(t) = &n.kind { Some(&**t) } else { None }).collect();
+    assert_eq!(texts.len(), 1, "{svg}");
+    assert_eq!(texts[0].plain_text(), text);
+    // It comes back where it was: the same line edges.
+    let again = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), texts[0]);
+    let to_doc = |t: &TextObject, x: f64, y: f64| t.xf * Point::new(x, y);
+    let (a0, b0) = (to_doc(texts[0], again.lines[0].x0, again.lines[0].baseline), Point::new(10.0 + line.x0, 40.0 + line.baseline));
+    assert!((a0.x - b0.x).abs() < 1.0 && (a0.y - b0.y).abs() < 1.0, "{a0:?} vs {b0:?}\n{svg}");
+}
+
+#[test]
+fn right_to_left_paragraphs_keep_their_direction_and_side() {
+    for justify in [vectorcraft_doc::Justify::Auto, vectorcraft_doc::Justify::Left, vectorcraft_doc::Justify::Center] {
+        let mut t = TextObject::point(Point::new(50.0, 60.0), "اقرأ المزيد عن SVG أيضًا.", CharStyle::default());
+        t.edit_paras(None, |pa| {
+            pa.direction = Some(vectorcraft_doc::ParaDirection::RightToLeft);
+            pa.justify = justify;
+        });
+        let lay = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &t);
+        let (x0, x1) = (lay.lines[0].x0 + 50.0, lay.lines[0].x1 + 50.0);
+        let d = doc_with(vec![Node::new(NodeId(100), NodeKind::Text(Box::new(t)))]);
+        let svg = export(&d, &ExportOptions::default());
+        assert!(svg.contains("direction=\"rtl\"") && svg.contains("اقرأ المزيد عن SVG أيضًا."), "{svg}");
+        let back = import(&svg).unwrap();
+        let t2 = art(&back).iter().find_map(|n| if let NodeKind::Text(t) = &n.kind { Some((**t).clone()) } else { None }).unwrap();
+        assert_eq!(t2.para_at(0).direction, Some(vectorcraft_doc::ParaDirection::RightToLeft), "{justify:?}");
+        let l2 = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &t2);
+        let (y0, y1) = ((t2.xf * Point::new(l2.lines[0].x0, 0.0)).x, (t2.xf * Point::new(l2.lines[0].x1, 0.0)).x);
+        assert!((y0 - x0).abs() < 1.0 && (y1 - x1).abs() < 1.0, "{justify:?}: {x0}..{x1} came back as {y0}..{y1}\n{svg}");
+    }
+}
+
+#[test]
+fn bidirectional_type_on_a_path_is_still_outlined_with_a_warning() {
+    let path = shapes::rectangle(Rect::new(10.0, 10.0, 190.0, 190.0));
+    let mut t = TextObject::point(Point::new(0.0, 0.0), "שלום עולם", CharStyle::default());
+    t.kind = TextKind::OnPath { path, start: 0.0, end: None };
+    let d = doc_with(vec![Node::new(NodeId(100), NodeKind::Text(Box::new(t)))]);
+    let (svg, warnings) = vectorcraft_svg::export_with_report(&d, &ExportOptions::default());
+    assert!(!svg.contains("<text") && svg.contains("<path"), "{svg}");
+    assert!(warnings.iter().any(|w| w.contains("bidirectional type on a path")), "{warnings:?}");
 }

@@ -150,13 +150,14 @@ fn character_direction_is_written_on_its_runs() {
     let tags = tspans(&svg);
     assert!(svg.contains("<textPath") && tags.len() == 2, "{svg}");
     assert!(!tags[0].contains("direction") && tags[1].contains(" direction=\"ltr\" unicode-bidi=\"embed\""), "{svg}");
-    // A run set Right to Left is written as outlines, also when its characters are drawn left to
-    // right (digits inside an embedding stay left to right).
+    // A run set Right to Left stays text, also when its characters are drawn left to right
+    // (digits inside an embedding stay left to right): the line is written whole, in logical
+    // order, and the run carries its embedding.
     let rtl = CharStyle { char_direction: Some(ParaDirection::RightToLeft), ..style(12.0) };
     for date in ["21 10 2026", "2026"] {
         let d = area_doc(vec![run("Due ", style(12.0)), run(date, rtl.clone())], 280.0, Justify::Left);
         let svg = export(&d, &ExportOptions::default());
-        assert!(!svg.contains("<text"), "{date}: {svg}");
+        assert!(svg.contains("<text") && svg.contains(&format!(" direction=\"rtl\" unicode-bidi=\"embed\">{date}</tspan>")), "{date}: {svg}");
     }
 }
 

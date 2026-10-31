@@ -1981,15 +1981,18 @@ impl Writer<'_> {
     /// (`text-anchor`) at their centre or right end, so they stay aligned in a viewer whose font
     /// differs; other lines are placed where each style run (and, justified, each word) starts.
     fn text(&mut self, n: &Node, t: &TextObject) {
-        // Live SVG text is written in logical order from left-aligned pieces: bidirectional text
-        // (and right-to-left paragraphs) keep their look as outlines until it is written with
-        // `direction`/`unicode-bidi`. So do runs set Right to Left (Character Direction), whose
-        // `direction="rtl"` would anchor their pieces at the right end.
+        // Bidirectional text (right-to-left paragraphs, Arabic or Hebrew in a left-to-right line,
+        // runs set Right to Left) stays text: each line is written whole, in logical order, and
+        // the viewer shapes and orders it by `direction`/`unicode-bidi` (`text_bidi`). Only what
+        // a line of SVG text can't hold keeps its look as outlines.
         let lay = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), t);
         let rtl_runs = t.runs.iter().any(|r| r.style.char_direction == Some(vectorcraft_doc::ParaDirection::RightToLeft));
         if lay.glyphs.iter().any(|g| g.rtl) || lay.lines.iter().any(|l| l.rtl) || rtl_runs {
-            self.warn("bidirectional text is outlined to preserve shaping and visual order");
-            return self.text_outlines(n, t);
+            if let Some(why) = bidi_needs_outlines(t, &lay) {
+                self.warn(why);
+                return self.text_outlines(n, t);
+            }
+            return self.text_bidi(n, t, &lay);
         }
         if let TextKind::OnPath { path, start, end } = &t.kind {
             // `<textPath>` has a start offset only: an end bracket, Align to Path and Spacing
@@ -2116,6 +2119,101 @@ impl Writer<'_> {
     /// the style changes nested in it, positioned again only after tabs and inline graphics.
     /// Baseline shifts are relative (`dy`), undone by the next segment that isn't shifted.
     /// `positioned`: false when the caller already positioned the line (an outer `<tspan>`).
+    /// Bidirectional type as live text: one `<tspan>` per laid-out line, holding the line's
+    /// characters in logical order (each style run its own `<tspan>`), placed at the line's edge
+    /// its paragraph is aligned to and anchored there in the line's own direction, so a viewer's
+    /// bidi algorithm and shaping draw it as the canvas does. Right-to-left lines are written with
+    /// `direction="rtl"` (on the `<text>` when every line is). Justified lines are aligned to
+    /// their side (a viewer can't justify SVG text), with a warning.
+    fn text_bidi(&mut self, n: &Node, t: &TextObject, lay: &vectorcraft_text::TextLayout) {
+        self.note_fonts(t, lay);
+        let fitted = (lay.fit_scale != 1.0).then(|| vectorcraft_text::scaled(t, lay.fit_scale));
+        let drawn = fitted.as_ref().unwrap_or(t);
+        let plain = drawn.plain_text();
+        let space = (lay.bounds, Affine::IDENTITY);
+        let base_props = self.char_props(&drawn.first_style(), space);
+        let all_rtl = !lay.lines.is_empty() && lay.lines.iter().all(|l| l.rtl);
+        let mut props = base_props.clone();
+        if all_rtl {
+            props.push(("direction", "rtl".into()));
+            props.push(("unicode-bidi", "embed".into()));
+        }
+        props.extend(css::transparency(n));
+        let id = self.id_attr(n);
+        let a = self.attrs(&props);
+        let m = self.xf * t.xf;
+        let tr = if m == Affine::IDENTITY { String::new() } else { format!(" transform=\"{}\"", self.matrix(m)) };
+        // Each run's byte range in the plain text.
+        let mut runs = Vec::with_capacity(drawn.runs.len());
+        let mut at = 0usize;
+        for (i, r) in drawn.runs.iter().enumerate() {
+            runs.push((at, at + r.text.len(), i));
+            at += r.text.len();
+        }
+        let mut justified = false;
+        let mut s = format!("<text{id}{tr} xml:space=\"preserve\"{a}>");
+        for line in &lay.lines {
+            let para = plain.as_bytes().get(..line.start).map_or(0, |b| b.iter().filter(|&&c| c == b'\n').count());
+            let style = drawn.para_at(para);
+            // Spaces where the line wrapped (it doesn't end its paragraph) don't belong to the line.
+            let mut end = line.end.min(plain.len());
+            if plain.get(end..).is_some_and(|rest| !rest.is_empty() && !rest.starts_with('\n')) {
+                end = line.start + plain.get(line.start..end).map_or(0, |l| l.trim_end().len());
+            }
+            if plain.get(line.start..end).is_none_or(str::is_empty) {
+                continue;
+            }
+            let side = match style.justify {
+                Justify::Auto | Justify::JustifyAll if line.rtl => Justify::Right,
+                Justify::Auto | Justify::JustifyAll => Justify::Left,
+                Justify::Left | Justify::JustifyLeft => Justify::Left,
+                Justify::Center | Justify::JustifyCenter => Justify::Center,
+                Justify::Right | Justify::JustifyRight => Justify::Right,
+            };
+            justified |= matches!(style.justify, Justify::JustifyLeft | Justify::JustifyCenter | Justify::JustifyRight | Justify::JustifyAll);
+            // `start`/`end` follow the line's direction: the visual left of a right-to-left line is its end.
+            let (x, anchor) = match side {
+                Justify::Right => (line.x1, if line.rtl { "start" } else { "end" }),
+                Justify::Center => ((line.x0 + line.x1) / 2.0, "middle"),
+                _ => (line.x0, if line.rtl { "end" } else { "start" }),
+            };
+            let p = lay.line_xf * Point::new(x, line.baseline);
+            let dir = match (all_rtl, line.rtl) {
+                (false, true) => " direction=\"rtl\" unicode-bidi=\"embed\"",
+                (true, false) => " direction=\"ltr\" unicode-bidi=\"embed\"",
+                _ => "",
+            };
+            let _ = write!(s, "<tspan x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\"{dir}>", self.num(p.x), self.num(p.y));
+            let mut shift = 0.0;
+            for &(r0, r1, ri) in &runs {
+                let (a0, a1) = (r0.max(line.start), r1.min(end));
+                let (Some(text), Some(run)) = (plain.get(a0..a1).filter(|_| a0 < a1), drawn.runs.get(ri)) else { continue };
+                let st = &run.style;
+                let mut attrs = String::new();
+                if st.baseline_shift != shift {
+                    let _ = write!(attrs, " dy=\"{}\"", self.num(shift - st.baseline_shift));
+                    shift = st.baseline_shift;
+                }
+                let mut diff = run_diff(&base_props, self.char_props(st, space));
+                diff.extend(direction_props(st));
+                attrs.push_str(&self.attrs(&diff));
+                let text = xml_text(text);
+                if attrs.is_empty() {
+                    s.push_str(&text);
+                } else {
+                    let _ = write!(s, "<tspan{attrs}>{text}</tspan>");
+                }
+            }
+            s.push_str("</tspan>");
+        }
+        s.push_str("</text>");
+        self.line(&s);
+        self.aligned_char_strokes(t);
+        if justified {
+            self.warn("justified bidirectional text is written aligned to its side: SVG viewers don't justify text");
+        }
+    }
+
     fn text_line(&mut self, s: &mut String, t: &TextObject, line: &[Segment], start: (f64, f64), base: &TextBase, positioned: bool) {
         let fewer = self.opts.fewer_tspans && positioned;
         if fewer {
@@ -2330,6 +2428,27 @@ fn hangs_on_path(t: &TextObject, lay: &vectorcraft_text::TextLayout) -> bool {
 /// its Character Direction, and nothing without one. Each `<tspan>` of characters with a direction
 /// carries them, and the `<text>` does not. Type with a run set Right to Left is written as
 /// outlines ([`Writer::text`]), so live text writes `direction="ltr"` only.
+/// Why bidirectional type `t` can't be written as lines of live SVG text, if it can't: the
+/// reason is the export warning, and the type is outlined to keep its look.
+fn bidi_needs_outlines(t: &TextObject, lay: &vectorcraft_text::TextLayout) -> Option<&'static str> {
+    if matches!(t.kind, TextKind::OnPath { .. }) {
+        return Some("bidirectional type on a path is outlined to preserve shaping and visual order");
+    }
+    if lay.vertical {
+        return Some("vertical bidirectional type is outlined to preserve shaping and visual order");
+    }
+    if !lay.markers.is_empty() {
+        return Some("bidirectional text with bullets or numbers is outlined to keep its look");
+    }
+    if t.runs.iter().any(|r| r.inline.is_some()) {
+        return Some("bidirectional text with inline graphics is outlined to keep its look");
+    }
+    if t.runs.iter().any(|r| (r.style.h_scale - r.style.v_scale).abs() > 1e-9 || r.style.rotation != 0.0) {
+        return Some("bidirectional text with scaled or rotated characters is outlined to keep its look");
+    }
+    None
+}
+
 fn direction_props(st: &CharStyle) -> Props {
     let Some(d) = st.char_direction else { return Props::new() };
     let direction = if d == vectorcraft_doc::ParaDirection::RightToLeft { "rtl" } else { "ltr" };
