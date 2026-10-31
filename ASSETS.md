@@ -12,6 +12,8 @@ Generated-in-code art is original and has no file to list. This covers the defau
 
 | Asset | Author | Source | Licence | Notes |
 |---|---|---|---|---|
+| `crates/pdf/tests/data/resvg-textPath-complex.svg` | The resvg Authors | https://github.com/linebender/resvg/blob/main/crates/resvg/tests/tests/text/textPath/complex.svg | Apache-2.0 OR MIT | Unmodified copy of the resvg test file: tagged-PDF text extraction of type on a path (`crates/pdf/src/tests_tagged.rs`) |
+| `crates/pdf/tests/data/resvg-bidi-reordering.svg` | The resvg Authors | https://github.com/linebender/resvg/blob/main/crates/resvg/tests/tests/text/text/bidi-reordering.svg | Apache-2.0 OR MIT | Unmodified copy of the resvg test file: tagged-PDF text extraction of bidirectional text (`crates/pdf/src/tests_tagged.rs`) |
 | `assets/app-icon/LICENSE.txt` | (licence/readme text) | VectorCraft | MIT OR Apache-2.0 |  |
 | `assets/app-icon/README.md` | (licence/readme text) | VectorCraft | MIT OR Apache-2.0 |  |
 | `assets/app-icon/hicolor/128x128/apps/ai.storyteller.vectorcraft.png` | Project owner (ArtCraft team) | Original artwork drawn in ArtCraft for VectorCraft, vectorised and rendered by `packaging/icons.sh` | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) | App icon (engraved dragon) |

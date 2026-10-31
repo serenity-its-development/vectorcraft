@@ -246,6 +246,11 @@ pub(crate) struct Writer {
     /// The document's images the exporters wrote, by key, gathered from the exporters
     /// ([`Self::absorb`]): [`Self::finish`] finds the key of an image the writer couldn't decode.
     images: Vec<(String, Image)>,
+    /// The structure of the text the exporters wrote, in the order it was drawn
+    /// ([`Self::absorb`]): [`Self::finish`] makes the file a tagged PDF of it.
+    tags: Vec<krilla::tagging::Node>,
+    /// The language of the document's text, when it is known ([`language_tag`]).
+    lang: Option<String>,
 }
 
 /// One page as [`Writer::page`] draws it: the art placed in a drawing space ([`Self::place`]),
@@ -321,7 +326,8 @@ impl Writer {
             keywords: info.keywords.clone(),
             created: created.map(date_time),
         };
-        let pdf = write::Writer::new(settings, metadata);
+        let lang = language_tag(&doc.setup.language);
+        let pdf = write::Writer::new_with_language(settings, metadata, lang.clone());
         Ok(Self {
             pdf,
             cmyk: out.blends_cmyk(cmyk),
@@ -331,6 +337,8 @@ impl Writer {
             rgb_in_cmyk: RgbInCmyk::default(),
             pdf13: set.pdf13(),
             images: vec![],
+            tags: vec![],
+            lang,
         })
     }
 
@@ -426,6 +434,7 @@ impl Writer {
                 self.lab_spots.push(spot);
             }
         }
+        self.tags.extend(ex.tags);
         // The exporter caches images by their key, followed by their size and mask after a NUL.
         for (cache, image) in ex.images {
             if let (Some(key), Some(image)) = (cache.split('\0').next(), image) {
@@ -440,6 +449,13 @@ impl Writer {
     /// `left_out` ([`leaving_out_undecodable`]) and the writer's error is returned.
     pub(crate) fn finish(mut self, left_out: &mut HashSet<String>, display_doc_title: bool) -> Result<(Vec<u8>, Vec<String>), PdfError> {
         let images = std::mem::take(&mut self.images);
+        // A tagged PDF (a structure tree, marked content): each text object is a paragraph whose
+        // lines carry the text they show, in logical order, which text extraction reads.
+        let tags = std::mem::take(&mut self.tags);
+        if !tags.is_empty() {
+            let tree = krilla::tagging::TagTree::from(tags).with_lang(self.lang.clone());
+            self.pdf.document_mut().set_tag_tree(tree);
+        }
         let mut bytes = self.pdf.finish().map_err(|e| {
             if let write::WriteError::Serialization(k) = &e
                 && let krilla::error::KrillaError::Image(failed, ..) = &**k
@@ -458,6 +474,35 @@ impl Writer {
         self.warnings.extend(self.rgb_in_cmyk.warning());
         Ok((crate::pdfx::finish(bytes, self.out.standard, self.pdf13)?, self.warnings))
     }
+}
+
+/// The BCP 47 tag of Document Setup's language `name` ([`vectorcraft_doc::setup::LANGUAGES`]),
+/// when the document's language is known: a language chosen in Document Setup. Every document
+/// starts in the first of them (an SVG file, say, never states its language to the importer), so
+/// that one says nothing about the text and gives none.
+fn language_tag(name: &str) -> Option<String> {
+    const TAGS: [(&str, &str); 19] = [
+        ("English: UK", "en-GB"),
+        ("German", "de-DE"),
+        ("German: Swiss", "de-CH"),
+        ("French", "fr-FR"),
+        ("Italian", "it-IT"),
+        ("Spanish", "es-ES"),
+        ("Portuguese", "pt-PT"),
+        ("Dutch", "nl-NL"),
+        ("Danish", "da-DK"),
+        ("Swedish", "sv-SE"),
+        ("Finnish", "fi-FI"),
+        ("Norwegian", "nb-NO"),
+        ("Polish", "pl-PL"),
+        ("Czech", "cs-CZ"),
+        ("Russian", "ru-RU"),
+        ("Turkish", "tr-TR"),
+        ("Japanese", "ja-JP"),
+        ("Chinese", "zh-CN"),
+        ("English: USA", ""),
+    ];
+    TAGS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name.trim())).map(|(_, tag)| tag.to_string()).filter(|tag| !tag.is_empty())
 }
 
 /// Make the transparency groups of `pdf` blend in CMYK. The PDF writer gives every group RGB as
@@ -629,6 +674,19 @@ pub(crate) struct Exporter<'a> {
     /// Objects the symbol instances written held, together
     /// ([`vectorcraft_doc::MAX_SYMBOL_NODES`]).
     symbol_nodes: u64,
+    /// The structure of the text written ([`Self::text`]): a paragraph for each text object, of
+    /// the marked content of its lines.
+    pub tags: Vec<krilla::tagging::Node>,
+    /// A text object's characters are being written inside marked content (which doesn't nest):
+    /// text drawn within them (in a colour glyph's art) is not marked again.
+    marking: bool,
+    /// The marked content being written carries the text it stands for (an ActualText).
+    actual: bool,
+    /// Glyphs were written as real text since the marked content began.
+    wrote_text: bool,
+    /// The characters the writer maps each glyph of real text to (its ToUnicode entry), by face
+    /// and glyph id, as it decides them ([`Self::draw_glyph_line`]).
+    codepoints: HashMap<(u32, u32), String>,
 }
 
 /// How deep inline graphics nest before they are left out.
@@ -675,6 +733,11 @@ impl<'a> Exporter<'a> {
             inline_depth: 0,
             pattern_depth: 0,
             left_out: HashSet::new(),
+            tags: vec![],
+            marking: false,
+            actual: false,
+            wrote_text: false,
+            codepoints: HashMap::new(),
         }
     }
 
@@ -1633,6 +1696,147 @@ impl Exporter<'_> {
         if let Some((bp, path)) = &all {
             self.text_items(s, below, bp, path, page, tb);
         }
+        if self.marking {
+            self.characters(s, t, &layout, page, false);
+        } else {
+            self.marked_characters(s, t, &layout, page);
+        }
+        s.set_fill(None);
+        s.set_stroke(None);
+        if self.inline_depth < MAX_INLINE_DEPTH {
+            self.inline_depth += 1;
+            for ig in &layout.inlines {
+                let Some(art) = t.runs.get(ig.run).and_then(|r| r.inline.as_ref()) else { continue };
+                let Some(sym) = doc.symbols.iter().find(|x| x.name == art.symbol) else { continue };
+                let mut node = (*sym.art).clone();
+                // Strokes scale with the art, as on the canvas.
+                node.transform(t.xf * ig.xf * doc.symbol_natural_xf(&art.symbol), true);
+                self.node(s, &node, page, true);
+            }
+            self.inline_depth -= 1;
+        }
+        if let Some((bp, path)) = &all {
+            self.text_items(s, above, bp, path, page, tb);
+        }
+    }
+
+    /// The characters of type `t` (laid out as `layout`) as marked content for text extraction
+    /// and accessibility, and a paragraph of it in the structure tree ([`Self::tags`]). Each
+    /// line's marked content carries the line's characters in logical (reading) order as its
+    /// ActualText, which text extractors read instead of the glyphs: bidirectional text is drawn
+    /// in visual order, type on a path glyph by glyph, outlined type has no characters at all.
+    ///
+    /// Type of one line is marked as a whole. Type of several lines is marked line by line when
+    /// its glyphs can't stand for its text (see [`Self::faithful`]); else it is marked as a
+    /// whole without an ActualText, its real text read as it is.
+    fn marked_characters(&mut self, s: &mut Surface, t: &TextObject, layout: &TextLayout, page: Rect) {
+        let text = t.plain_text();
+        let line_text = |line: &vectorcraft_text::LineInfo| actual_text(text.get(line.start..line.end).unwrap_or_default());
+        let mut paragraph = krilla::tagging::TagGroup::new(krilla::tagging::Tag::P);
+        self.marking = true;
+        match layout.lines.as_slice() {
+            [] => self.characters(s, t, layout, page, false),
+            [line] => {
+                let actual = line_text(line);
+                let id = self.marked_line(s, t, layout, page, false, actual.as_deref());
+                paragraph.push(id);
+            }
+            _ if self.faithful(t, layout) => {
+                let id = s.start_tagged(span(None));
+                self.characters(s, t, layout, page, false);
+                s.end_tagged();
+                paragraph.push(id);
+            }
+            lines => {
+                for (li, line) in lines.iter().enumerate() {
+                    let actual = line_text(line);
+                    let one = line_layout(layout, li);
+                    let id = self.marked_line(s, t, &one, page, true, actual.as_deref());
+                    paragraph.push(id);
+                }
+            }
+        }
+        (self.marking, self.actual) = (false, false);
+        self.tags.push(paragraph.into());
+    }
+
+    /// The characters of type `t` laid out as `layout` (a line of it, or all of it with `line`
+    /// false: see [`Self::characters`]) as marked content standing for `actual`. When none of them
+    /// is real text (outlined type, fonts that can't be embedded), an invisible space stretched
+    /// over them carries the ActualText ([`Self::text_carrier`]): text extractors (poppler) read
+    /// an ActualText only where text is shown. Outlined type (Outline Text) keeps no font, so
+    /// there it is the ActualText alone.
+    fn marked_line(
+        &mut self,
+        s: &mut Surface,
+        t: &TextObject,
+        layout: &TextLayout,
+        page: Rect,
+        line: bool,
+        actual: Option<&str>,
+    ) -> krilla::tagging::Identifier {
+        let id = s.start_tagged(span(actual));
+        (self.actual, self.wrote_text) = (actual.is_some(), false);
+        self.characters(s, t, layout, page, line);
+        // Outlined type has no fonts at all (Outline Text), so no carrier: its ActualText is
+        // there for readers that take it from the marked content alone.
+        if self.actual && !self.wrote_text && !self.outline_text {
+            self.text_carrier(s, t, layout);
+        }
+        s.end_tagged();
+        self.actual = false;
+        id
+    }
+
+    /// An invisible space over the glyphs of `layout` (of type `t`), as wide as they are, in the
+    /// font of the first of them that may be embedded and has a space (nothing when none has).
+    fn text_carrier(&mut self, s: &mut Surface, t: &TextObject, layout: &TextLayout) {
+        let ink = layout.glyphs.iter().map(|g| g.outline.bounding_box()).filter(|b| b.area() > 0.0).reduce(|a, b| a.union(b));
+        let Some(ink) = ink.or_else(|| (layout.bounds.area() > 0.0).then_some(layout.bounds)) else { return };
+        let db = vectorcraft_text::FontDb::global();
+        let mut faces = layout.glyphs.iter().map(|g| g.font_id).collect::<Vec<_>>();
+        faces.dedup();
+        let space = faces.into_iter().find_map(|id| {
+            let face = db.face_by_id(id).filter(|f| f.embedding() == Embedding::Subset)?;
+            let font = skrifa::FontRef::from_index(face.file_data(), face.face_index()).ok()?;
+            let gid = skrifa::MetadataProvider::charmap(&font).map(' ')?;
+            Some((id, gid.to_u32()))
+        });
+        let Some((face, gid)) = space else { return };
+        let Some((font, _)) = self.font(face) else { return };
+        let size = ink.height().max(1.0);
+        let line = GlyphLine { face, font, size, frame: Affine::translate((ink.x0, ink.y1)), glyphs: vec![(gid, 0.0, ink.width(), 0..1)] };
+        let text_space = xf(t.xf);
+        crate::forms::form(s, Mark::Invisible, |s| {
+            s.push_transform(&text_space);
+            self.draw_glyph_line(s, line, " ", &Paint::solid(Color::gray(0.0)), ink);
+            s.pop();
+        });
+        self.invisible = true;
+    }
+
+    /// Whether type `t`'s glyphs (laid out as `layout`) stand for its text as text extraction
+    /// reads them: real text in embedded fonts, horizontal, left to right, in lines.
+    fn faithful(&mut self, t: &TextObject, layout: &TextLayout) -> bool {
+        if self.outline_text || !t.ruby.is_empty() || layout.on_path || layout.vertical {
+            return false;
+        }
+        let mut faces = HashSet::new();
+        for g in &layout.glyphs {
+            if g.rtl || (g.len > 0 && (g.gid == 0 || is_svg_glyph(g))) {
+                return false;
+            }
+            if g.len > 0 && faces.insert(g.font_id) && self.font(g.font_id).is_none() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The characters of type `t`, laid out as `layout` (all its lines or one of them, `line`:
+    /// runs with no glyph on it draw nothing): their fills, as real text unless the type is
+    /// outlined, and their strokes.
+    fn characters(&mut self, s: &mut Surface, t: &TextObject, layout: &TextLayout, page: Rect, line: bool) {
         // Real text: the characters' fills as text in embedded fonts. The type's transform is
         // pushed for each fill and stroke of the characters, inside its form when the fill or
         // stroke overprints.
@@ -1640,8 +1844,11 @@ impl Exporter<'_> {
         // Ruby can't be real text in one run (it isn't characters of the base text): the type's
         // characters go out as outlines where ruby is present, ruby included.
         let plain = (!self.outline_text && t.ruby.is_empty()).then(|| t.plain_text());
-        let bars = vectorcraft_text::decorations(&layout, vectorcraft_text::FontDb::global(), t);
+        let bars = vectorcraft_text::decorations(layout, vectorcraft_text::FontDb::global(), t);
         for (i, run) in t.runs.iter().enumerate() {
+            if line && !layout.glyphs.iter().chain(&layout.ruby).any(|g| g.run == i) {
+                continue;
+            }
             let mut bp = BezPath::new();
             for g in layout.glyphs.iter().filter(|g| g.run == i).chain(layout.ruby.iter().filter(|g| g.run == i)) {
                 bp.extend(g.outline.iter());
@@ -1660,7 +1867,7 @@ impl Exporter<'_> {
                 // The outlines left to fill as paths: all of them, or those real text leaves.
                 let outlines = match plain.as_deref().filter(|_| !fill.is_none() && !ex.area_paint(fill, true)) {
                     Some(text) => {
-                        let (mut left, unwritten) = ex.glyph_text(s, &layout, i, text, fill, true);
+                        let (mut left, unwritten) = ex.glyph_text(s, layout, i, text, fill, true);
                         images = Some(unwritten);
                         left.extend(run_bars.iter());
                         Cow::Owned(left)
@@ -1700,7 +1907,7 @@ impl Exporter<'_> {
                     s.push_transform(&text_space);
                     // The paint only lets the writer write the text; the glyphs it can't write
                     // as text draw nothing, and colour bitmap glyphs are drawn already.
-                    self.glyph_text(s, &layout, i, text, &Paint::solid(Color::gray(0.0)), false);
+                    self.glyph_text(s, layout, i, text, &Paint::solid(Color::gray(0.0)), false);
                     s.pop();
                 });
             }
@@ -1716,23 +1923,6 @@ impl Exporter<'_> {
                     s.pop();
                 });
             }
-        }
-        s.set_fill(None);
-        s.set_stroke(None);
-        if self.inline_depth < MAX_INLINE_DEPTH {
-            self.inline_depth += 1;
-            for ig in &layout.inlines {
-                let Some(art) = t.runs.get(ig.run).and_then(|r| r.inline.as_ref()) else { continue };
-                let Some(sym) = doc.symbols.iter().find(|x| x.name == art.symbol) else { continue };
-                let mut node = (*sym.art).clone();
-                // Strokes scale with the art, as on the canvas.
-                node.transform(t.xf * ig.xf * doc.symbol_natural_xf(&art.symbol), true);
-                self.node(s, &node, page, true);
-            }
-            self.inline_depth -= 1;
-        }
-        if let Some((bp, path)) = &all {
-            self.text_items(s, above, bp, path, page, tb);
         }
     }
 
@@ -1876,17 +2066,26 @@ impl Exporter<'_> {
     /// Draw glyphs `line` (of `text`), filled with `fill` (whose space is text space, where
     /// `bounds` is). A line that would be written with a pen position, size or spacing (in
     /// thousandths of an em) beyond [`MAX_COORD`] is left out.
+    ///
+    /// Inside marked content that carries its text ([`Self::actual`]) the glyphs' characters are
+    /// only what the font maps them to: each glyph stands for the characters the writer mapped it
+    /// to already, else for its own characters (none for the rest of a cluster). The writer then
+    /// marks no cluster or glyph with an ActualText of its own, which can't nest in the line's.
     fn draw_glyph_line(&mut self, s: &mut Surface, line: GlyphLine, text: &str, fill: &Paint, bounds: Rect) {
         let size = line.size;
+        let (text, ranges) = if self.actual { self.mapped_text(&line, text) } else { (Cow::Borrowed(text), None) };
+        let text: &str = &text;
         let glyphs: Vec<KrillaGlyph> = line
             .glyphs
             .iter()
             .enumerate()
             .map(|(i, (gid, x, advance, range))| {
                 let next = line.glyphs.get(i + 1).map_or(x + advance, |n| n.1);
-                KrillaGlyph::new(GlyphId::new(*gid), ((next - x) / size) as f32, 0.0, 0.0, 0.0, range.clone(), None)
+                let range = ranges.as_ref().and_then(|r| r.get(i).cloned()).unwrap_or_else(|| range.clone());
+                KrillaGlyph::new(GlyphId::new(*gid), ((next - x) / size) as f32, 0.0, 0.0, 0.0, range, None)
             })
             .collect();
+        self.map_codepoints(line.face, &glyphs, text);
         let pens =
             line.glyphs.iter().fold(Rect::new(0.0, -size, 0.0, size), |r, (_, x, advance, _)| r.union_pt((*x, 0.0)).union_pt((x + advance, 0.0)));
         let spacing: Vec<f64> = glyphs.iter().map(|g| f64::from(g.x_advance(1.0)) * 1000.0).collect();
@@ -1895,11 +2094,58 @@ impl Exporter<'_> {
         }
         s.push_transform(&xf(line.frame));
         if let Some(paint) = self.paint_in(s, fill, bounds, line.frame.inverse()) {
+            self.wrote_text = true;
             s.set_stroke(None);
             s.set_fill(Some(Fill { paint, opacity: NormalizedF32::ONE, rule: krilla::paint::FillRule::NonZero }));
             s.draw_glyphs(krilla::geom::Point::from_xy(0.0, 0.0), &glyphs, line.font, text, size as f32, false);
         }
         s.pop();
+    }
+
+    /// The characters each glyph of `line` (of `text`) stands for inside marked content that
+    /// carries its text ([`Self::draw_glyph_line`]): a text of them, and each glyph's range in it.
+    /// The ranges are apart (a space between), so no two glyphs make a cluster, and in the order
+    /// of the glyphs' own, so right-to-left glyphs are still marked as written in reverse.
+    fn mapped_text(&self, line: &GlyphLine, text: &str) -> (Cow<'static, str>, Option<Vec<std::ops::Range<usize>>>) {
+        let chars: Vec<&str> = line
+            .glyphs
+            .iter()
+            .enumerate()
+            .map(|(i, (gid, _, _, range))| match self.codepoints.get(&(line.face, *gid)) {
+                Some(mapped) => mapped.as_str(),
+                None if i > 0 && line.glyphs.get(i - 1).is_some_and(|p| p.3 == *range) => "",
+                None => text.get(range.clone()).unwrap_or_default(),
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..line.glyphs.len()).collect();
+        order.sort_by_key(|&i| line.glyphs.get(i).map(|g| g.3.start));
+        let mut out = String::new();
+        let mut ranges = vec![0..0; line.glyphs.len()];
+        for i in order {
+            let start = out.len();
+            out.push_str(chars.get(i).copied().unwrap_or_default());
+            if let Some(r) = ranges.get_mut(i) {
+                *r = start..out.len();
+            }
+            out.push(' ');
+        }
+        (Cow::Owned(out), Some(ranges))
+    }
+
+    /// Note the characters the writer maps the glyphs of face `face` to when it writes `glyphs`
+    /// (of `text`) as real text: a glyph not mapped yet is mapped to its characters, unless it
+    /// continues the cluster of the glyph before it.
+    fn map_codepoints(&mut self, face: u32, glyphs: &[KrillaGlyph], text: &str) {
+        let mut prev = None;
+        for g in glyphs {
+            let range = g.text_range().clone();
+            if prev.as_ref() != Some(&range)
+                && let Some(chars) = text.get(range.clone())
+            {
+                self.codepoints.entry((face, g.glyph_id().to_u32())).or_insert_with(|| chars.to_string());
+            }
+            prev = Some(range);
+        }
     }
 
     /// The font of face `id` for real text and its units per em; `None` (with a warning) when its
@@ -2077,6 +2323,63 @@ fn embed(blob: &vectorcraft_doc::ImageBlob, interpolate: bool, sixteen_bit: bool
 }
 
 /// Is `g` drawn from its font's SVG document, which the PDF writer can't draw as a font's glyph?
+/// The marked content of a line of text, with `actual` (its characters in logical order) as the
+/// text it stands for.
+fn span(actual: Option<&str>) -> krilla::tagging::ContentTag<'_> {
+    krilla::tagging::ContentTag::Span(krilla::tagging::SpanTag::empty().with_actual_text(actual))
+}
+
+/// The ActualText of a line whose characters are `line`: those that draw something or space the
+/// words (control characters, a paragraph's break included, are left out), none when that leaves
+/// nothing to read.
+fn actual_text(line: &str) -> Option<String> {
+    let text: String = line.chars().filter(|c| !c.is_control()).collect();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Line `li` of `layout` as a layout of its own: its glyphs (and its ruby, inline graphics and
+/// list markers, their glyph indices renumbered), at the place they have in the whole, whose
+/// bounds (which the fills' gradients span) it keeps.
+fn line_layout(layout: &TextLayout, li: usize) -> TextLayout {
+    let mut index = vec![None; layout.glyphs.len()];
+    let mut glyphs = vec![];
+    for (gi, g) in layout.glyphs.iter().enumerate() {
+        if g.line == li
+            && let Some(slot) = index.get_mut(gi)
+        {
+            *slot = Some(glyphs.len());
+            glyphs.push(g.clone());
+        }
+    }
+    let at = |gi: usize| index.get(gi).copied().flatten();
+    let inlines = layout.inlines.iter().filter_map(|ig| Some(vectorcraft_text::InlineGlyph { glyph: at(ig.glyph)?, ..ig.clone() })).collect();
+    let markers = layout
+        .markers
+        .iter()
+        .filter_map(|m| {
+            let (start, tab) = (at(m.glyphs.start)?, at(m.tab)?);
+            let end = at(m.glyphs.end.checked_sub(1)?)? + 1;
+            Some(vectorcraft_text::ListMarker { glyphs: start..end, tab, text: m.text.clone() })
+        })
+        .collect();
+    let lines =
+        layout.lines.get(li).map(|l| vectorcraft_text::LineInfo { glyph_start: 0, glyph_end: glyphs.len(), ..l.clone() }).into_iter().collect();
+    TextLayout {
+        vertical: layout.vertical,
+        line_xf: layout.line_xf,
+        glyphs,
+        ruby: layout.ruby.iter().filter(|g| g.line == li).cloned().collect(),
+        lines,
+        bounds: layout.bounds,
+        overflow: layout.overflow,
+        on_path: layout.on_path,
+        frames: layout.frames.clone(),
+        fit_scale: layout.fit_scale,
+        inlines,
+        markers,
+    }
+}
+
 fn is_svg_glyph(g: &vectorcraft_text::PositionedGlyph) -> bool {
     vectorcraft_text::FontDb::global().is_svg_glyph(g.font_id, g.gid)
 }
