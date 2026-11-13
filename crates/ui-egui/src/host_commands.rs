@@ -102,6 +102,27 @@ impl VectorcraftApp {
         vectorcraft_engine::cmd::fileio::bytes_of_a_save(&self.session, st, view.as_ref()).map_err(|e| e.to_string())
     }
 
+    /// The host's ask for an export, answered: the file's name and bytes. A document whose own file Save writes back
+    /// (`fileio::saves_back`) answers with those bytes under the host's own name ([`Self::host_export_bytes`]). A document opened
+    /// from a file Save does not write back (EPS and the other imports, a `.ai` file without the native document, a lossy read, a
+    /// converted or recovered document) answers with the native file Save As writes, named `<stem>.vectorcraft`: the host keeps it
+    /// as a NEW file beside the original, which is never written (oneos files/038, the import rule). Refused when no open document
+    /// is the host's file (it did not open, or the person saved it under another name), and when the save is more than one file.
+    pub fn host_export(&self, name: &str) -> Result<(String, Vec<u8>), String> {
+        let docs = self.session.documents();
+        if docs.iter().any(|st| vectorcraft_engine::cmd::fileio::saves_back(st, name)) {
+            return self.host_export_bytes(name).map(|bytes| (name.to_string(), bytes));
+        }
+        let st = docs
+            .iter()
+            .find(|st| st.path.as_deref() == Some(name))
+            // An import has no file of its own until it is saved; one saved under another name is not the host's file any more.
+            .or_else(|| docs.iter().find(|st| st.path.is_none() && (st.imported_from.as_deref() == Some(name) || docs.len() == 1)))
+            .ok_or_else(|| format!("no open document is {name}"))?;
+        let stem = vectorcraft_engine::cmd::fileio::file_stem(name);
+        vectorcraft_engine::cmd::fileio::bytes_of_a_native_save(&self.session, st, &stem).map_err(|e| e.to_string())
+    }
+
     /// Whether any document has changes the host does not hold yet.
     pub fn host_dirty(&self) -> bool {
         self.session.documents().iter().any(|d| d.is_dirty())
@@ -328,6 +349,47 @@ mod tests {
             app.run("file.save", json!({"modified": null})).unwrap();
             assert_eq!(written.borrow_mut().pop().map(|(n, b)| (n, b == exported)), Some((name.to_string(), true)), "{name}: Save writes the exported bytes");
         }
+    }
+
+    /// A document Save does not write back over the host's file (here: converted from an older version, and restored by Data
+    /// Recovery) is answered with the NATIVE file under `<stem>.vectorcraft`, holding the edit; the host keeps it beside the
+    /// original. NEGATIVE: a file Save writes back is answered in its own format under its own name, and a document saved under
+    /// another name is not answered at all.
+    #[test]
+    fn an_import_is_exported_as_a_native_file_named_beside_the_original() {
+        let svg =
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect x="5" y="5" width="40" height="30" fill="#0000ff"/></svg>"##;
+        let services = crate::Services { download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))), ..Default::default() };
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), services);
+        app.open_host_file("logo.svg", svg).unwrap();
+        let (own, bytes) = app.host_export("logo.svg").unwrap();
+        assert_eq!(own, "logo.svg", "a file Save writes back keeps its own name");
+        assert!(String::from_utf8_lossy(&bytes).contains("<svg"), "and its own format");
+        app.run_command_batch(&json!({"label": "Add", "steps": [{"name": "shape.ellipse", "args": {"x": 60, "y": 10, "width": 30, "height": 30}}]}))
+            .unwrap();
+        for flag in ["converted", "recovered"] {
+            {
+                let st = app.session.active_mut().unwrap();
+                st.converted = flag == "converted";
+                st.recovered = flag == "recovered";
+            }
+            let revision = app.session.active().unwrap().revision;
+            let (name, native) = app.host_export("logo.svg").unwrap_or_else(|e| panic!("{flag}: {e}"));
+            assert_eq!(name, "logo.vectorcraft", "{flag}: the native file, named beside the original");
+            let mut back = VectorcraftApp::new(vectorcraft_engine::Session::new(), crate::Services::default());
+            back.open_host_file("logo.vectorcraft", &native).unwrap_or_else(|e| panic!("{flag}: the native file opens: {e}"));
+            let count = |s: &mut vectorcraft_engine::Session| s.execute("select.all", &json!({})).unwrap()["count"].as_u64().unwrap_or(0);
+            assert_eq!(count(&mut back.session), 2, "{flag}: the rectangle and the edit's ellipse");
+            assert!(app.host_dirty() && app.session.active().unwrap().revision == revision, "{flag}: an export is not a save");
+        }
+        {
+            let st = app.session.active_mut().unwrap();
+            st.converted = false;
+            st.recovered = false;
+        }
+        app.run("file.saveAs", json!({"path": "copy.svg", "options": {}})).unwrap();
+        assert_eq!(app.session.active().unwrap().path.as_deref(), Some("copy.svg"));
+        assert!(app.host_export("logo.svg").is_err(), "saved under another name: nothing is exported in its place");
     }
 
     #[test]

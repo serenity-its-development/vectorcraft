@@ -716,6 +716,44 @@ pub fn bytes_of_a_save(s: &Session, st: &DocState, view: Option<&vectorcraft_doc
     Ok(enc.files.swap_remove(0).1)
 }
 
+/// Whether File › Save writes `st` back over `name`, its own file, without asking first: the document has that file (it was not
+/// converted from an older version or restored by Data Recovery), in a format Save writes, and writing over it loses nothing
+/// reading it left out. Otherwise the file is an IMPORT for Save (EPS and the other read-only formats, a `.ai` file without the
+/// native document, a lossy read): [`bytes_of_a_native_save`] keeps it instead.
+pub fn saves_back(st: &DocState, name: &str) -> bool {
+    let cmd = SaveMode::Save.command();
+    st.path.as_deref() == Some(name)
+        && !st.converted
+        && !st.recovered
+        && checked(cmd, st.format).is_ok()
+        && super::check_not_lossy_overwrite(st, name, &Value::Null, cmd).is_ok()
+}
+
+/// The native VectorCraft file Save As writes for `st`, as `st` stands, named `<stem>.vectorcraft`: what the OneOS host keeps for
+/// a document whose own file Save does not write back ([`saves_back`]), as a NEW file beside the original (oneos files/038, the
+/// import rule). Nothing here is a save: `s` and `st` are only read. Refused when the save is more than the one file.
+pub fn bytes_of_a_native_save(s: &Session, st: &DocState, stem: &str) -> Result<(String, Vec<u8>)> {
+    let cmd = SaveMode::SaveAs.command();
+    let format = checked(cmd, "vectorcraft")?;
+    let name = format!("{stem}.{}", format.extensions[0]);
+    let plan = SavePlan {
+        mode: SaveMode::SaveAs,
+        format,
+        options: Map::new(),
+        name: name.clone(),
+        folder: None,
+        path: Some(name.clone()),
+        modified: None,
+        notes: Vec::new(),
+    };
+    let job = job_for(s, st, plan)?;
+    let mut enc = job.encode()?;
+    if enc.files.len() != 1 || !enc.linked.is_empty() || !enc.maps.is_empty() {
+        return Err(bad(cmd, format!("a native save of {name} writes {} files, not the one file", enc.files.len())));
+    }
+    Ok((name, enc.files.swap_remove(0).1))
+}
+
 impl SaveJob {
     pub fn plan(&self) -> &SavePlan {
         &self.plan

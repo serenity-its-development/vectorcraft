@@ -249,17 +249,19 @@ impl Bridge {
 
     /// `craft:save {…, checkpoint: request}` to the parent: the answer to its `craft:export`. Never a save of the person's: the
     /// same message a save posts (`save_fn`), under the host's own name for the file and so never as a copy.
-    pub fn post_export(&self, bytes: &[u8], request: u64) -> Result<(), String> {
-        let (session, name, base) = {
+    /// `name` is the host's own name for the file, or `<stem>.vectorcraft` for a file Save does not write back (an import): the
+    /// host keeps that one as a new file beside the original.
+    pub fn post_export(&self, name: &str, bytes: &[u8], request: u64) -> Result<(), String> {
+        let (session, base) = {
             let opened = self.opened.borrow();
-            (opened.session.clone(), opened.name.clone(), opened.version_id.clone())
+            (opened.session.clone(), opened.version_id.clone())
         };
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
         let m = message(&[
             ("type", "craft:save".into()),
             ("session", session.as_str().into()),
-            ("name", name.as_str().into()),
-            ("mime", mime_of(&name).into()),
+            ("name", name.into()),
+            ("mime", mime_of(name).into()),
             ("baseVersionId", base.as_str().into()),
             ("saveAs", false.into()),
             ("checkpoint", (request as f64).into()),
