@@ -297,6 +297,39 @@ mod tests {
         assert!(app.host_export_bytes("logo.svg").is_err());
     }
 
+    /// Every format Save writes back over the host's file answers the export with exactly the bytes its Save writes: compressed SVG,
+    /// an Illustrator file and a PDF, each made by Vector's own Save As and opened as the host's file.
+    #[test]
+    fn an_export_for_the_host_is_the_bytes_of_a_save_in_svgz_ai_and_pdf_too() {
+        let written: Rc<RefCell<Vec<(String, Vec<u8>)>>> = Rc::default();
+        let services = |sink: Rc<RefCell<Vec<(String, Vec<u8>)>>>| crate::Services {
+            download: Some(Box::new(move |name: &str, bytes: &[u8]| {
+                sink.borrow_mut().push((name.to_string(), bytes.to_vec()));
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let svg =
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect x="5" y="5" width="40" height="30" fill="#0000ff"/></svg>"##;
+        for name in ["logo.svgz", "logo.ai", "logo.pdf"] {
+            // The file as Vector itself writes it in that format.
+            let mut maker = VectorcraftApp::new(vectorcraft_engine::Session::new(), services(written.clone()));
+            maker.open_host_file("logo.svg", svg).unwrap();
+            maker.run("file.saveAs", json!({"path": name, "options": {}, "modified": null})).unwrap();
+            let file = written.borrow_mut().pop().unwrap_or_else(|| panic!("{name}: Save As wrote nothing")).1;
+
+            let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), services(written.clone()));
+            app.open_host_file(name, &file).unwrap();
+            app.run_command_batch(&json!({"label": "Add", "steps": [{"name": "shape.ellipse", "args": {"x": 60, "y": 10, "width": 30, "height": 30}}]}))
+                .unwrap();
+            let exported = app.host_export_bytes(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(app.host_dirty(), "{name}: an export is not a save");
+            assert!(written.borrow().is_empty(), "{name}: nothing went through the write service");
+            app.run("file.save", json!({"modified": null})).unwrap();
+            assert_eq!(written.borrow_mut().pop().map(|(n, b)| (n, b == exported)), Some((name.to_string(), true)), "{name}: Save writes the exported bytes");
+        }
+    }
+
     #[test]
     fn the_first_views_place_is_the_middle_of_its_window_in_document_points() {
         let place = FirstViewPlace {
