@@ -66,7 +66,7 @@ pub struct Bridge {
     version: String,
     opened: Rc<RefCell<Opened>>,
     /// The host's asks for the drawing's bytes (`craft:export`), judged when heard and answered on the next frame.
-    exports: Rc<RefCell<Vec<u64>>>,
+    exports: Rc<RefCell<Vec<(u64, bool)>>>,
 }
 
 /// `scheme://host[:port]` exactly: https, or http only on localhost (the dev estate).
@@ -197,7 +197,7 @@ impl Bridge {
                         crate::export::judge(&opened.session, opened.read_only, &asked, request)
                     };
                     match judged {
-                        Ok(request) => bridge.exports.borrow_mut().push(request),
+                        Ok(request) => bridge.exports.borrow_mut().push((request, string(&data, "keep").as_deref() == Some("original"))),
                         Err(why) => log::warn!("Vector: an export ask was not taken: {why:?}"),
                     }
                 }
@@ -238,7 +238,7 @@ impl Bridge {
     }
 
     /// The export asks heard since the last frame.
-    pub fn take_exports(&self) -> Vec<u64> {
+    pub fn take_exports(&self) -> Vec<(u64, bool)> {
         std::mem::take(&mut *self.exports.borrow_mut())
     }
 
@@ -251,11 +251,15 @@ impl Bridge {
     /// same message a save posts (`save_fn`), under the host's own name for the file and so never as a copy.
     /// `name` is the host's own name for the file, or `<stem>.vectorcraft` for a file Save does not write back (an import): the
     /// host keeps that one as a new file beside the original.
-    pub fn post_export(&self, name: &str, bytes: &[u8], request: u64) -> Result<(), String> {
+    pub fn post_export(&self, name: &str, bytes: &[u8], request: u64, losses: &[String]) -> Result<(), String> {
         let (session, base) = {
             let opened = self.opened.borrow();
             (opened.session.clone(), opened.version_id.clone())
         };
+        let named = js_sys::Array::new();
+        for l in losses {
+            named.push(&JsValue::from_str(l));
+        }
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
         let m = message(&[
             ("type", "craft:save".into()),
@@ -265,6 +269,7 @@ impl Bridge {
             ("baseVersionId", base.as_str().into()),
             ("saveAs", false.into()),
             ("checkpoint", (request as f64).into()),
+            ("losses", named.into()),
             ("bytes", buffer.clone().into()),
         ])
         .ok_or_else(|| "couldn't build the message".to_string())?;

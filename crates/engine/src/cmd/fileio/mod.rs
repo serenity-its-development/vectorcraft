@@ -75,7 +75,7 @@ pub use pdfimport::{LoadOptions, page_document};
 pub(crate) use save::job_for;
 pub use save::{
     SAVE_FORMATS, SaveJob, SaveMode, SavePlan, StreamWrite, TEMPLATE_FORMATS, bytes_of_a_native_save, bytes_of_a_save, export_folder,
-    reads_option as save_reads_option, remembered_save_options, save_filters, save_format, save_job, save_plan, save_with, saves_back, stamp_save_dates,
+    reads_option as save_reads_option, remembered_save_options, save_filters, save_format, save_job, save_losses, save_plan, save_with, saves_back, stamp_save_dates,
     template_filters, templates_dialog_folder, templates_folder,
 };
 pub use screens::{

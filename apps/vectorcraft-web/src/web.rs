@@ -511,11 +511,11 @@ fn host_after(framed: &Framed, handover: &mut Handover, app: &mut VectorcraftApp
         }
     });
     // The host's asks for the bytes: the drawing as it stands, with nothing committed, stamped or marked saved.
-    for request in framed.bridge.take_exports() {
+    for (request, keep_original) in framed.bridge.take_exports() {
         let name = framed.bridge.opened_name();
-        match app.host_export(&name) {
-            Ok((as_name, bytes)) => {
-                if let Err(e) = framed.bridge.post_export(&as_name, &bytes, request) {
+        match app.host_export(&name, keep_original) {
+            Ok((as_name, bytes, losses)) => {
+                if let Err(e) = framed.bridge.post_export(&as_name, &bytes, request, &losses) {
                     log::warn!("Vector: the export could not be handed to the host: {e}");
                 }
             }

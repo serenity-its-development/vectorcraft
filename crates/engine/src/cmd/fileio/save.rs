@@ -693,17 +693,7 @@ pub fn bytes_of_a_save(s: &Session, st: &DocState, view: Option<&vectorcraft_doc
     };
     let format = checked(cmd, st.format)?;
     super::check_not_lossy_overwrite(st, &path, &Value::Null, cmd)?;
-    let plan = SavePlan {
-        mode: SaveMode::Save,
-        format,
-        options: remembered_save_options(st),
-        name: format!("{}.{}", file_stem(&path), format.extensions[0]),
-        folder: parent_folder(&path),
-        path: Some(path.clone()),
-        modified: None,
-        notes: Vec::new(),
-    };
-    let mut job = job_for(s, st, plan)?;
+    let mut job = job_for(s, st, plain_save_plan(st, format, &path))?;
     if let Some(view) = view.filter(|v| is_native(format) && job.doc.last_view.as_ref() != Some(*v)) {
         // A copy when the document is shared with `st`: `st` keeps the view it has.
         Arc::make_mut(&mut job.doc).last_view = Some(view.clone());
@@ -714,6 +704,48 @@ pub fn bytes_of_a_save(s: &Session, st: &DocState, view: Option<&vectorcraft_doc
         return Err(bad(cmd, format!("a save of {path} writes {n} files, not the one file")));
     }
     Ok(enc.files.swap_remove(0).1)
+}
+
+/// The plan of a plain File › Save of `st` over `path` in `format`, with the options it was last saved with.
+fn plain_save_plan(st: &DocState, format: &'static Format, path: &str) -> SavePlan {
+    SavePlan {
+        mode: SaveMode::Save,
+        format,
+        options: remembered_save_options(st),
+        name: format!("{}.{}", file_stem(path), format.extensions[0]),
+        folder: parent_folder(path),
+        path: Some(path.to_string()),
+        modified: None,
+        notes: Vec::new(),
+    }
+}
+
+/// What a plain Save of `st` over `name` would lose, as the writer states it before encoding (oneos files/044: auto-save writes only
+/// a format that loses nothing): why the file cannot be written back at all (a format Save only reads, a converted or recovered
+/// document, what reading it left out), else the format's own losses (the artboards SVG leaves out, what a non-native format does not
+/// keep). Empty: the file holds everything; a native VectorCraft file states none.
+pub fn save_losses(s: &Session, st: &DocState, name: &str) -> Vec<String> {
+    let cmd = SaveMode::Save.command();
+    let label = format(st.format).map_or(st.format, |f| f.label);
+    if st.converted {
+        return vec![format!("the older VectorCraft file it was converted from (it is never written back in that version)")];
+    }
+    if st.recovered {
+        return vec!["a file of its own: Data Recovery restored it".to_string()];
+    }
+    if st.path.as_deref() != Some(name) {
+        return vec![format!("everything a VectorCraft document holds: Vector reads {label} but does not write it")];
+    }
+    let Ok(f) = checked(cmd, st.format) else {
+        return vec![format!("everything a VectorCraft document holds: Vector reads {label} but does not write it")];
+    };
+    if let Some(losses) = super::overwrite_losses(st, name, &Value::Null) {
+        return vec![format!("what reading it left out ({})", super::losses_summary(losses))];
+    }
+    match job_for(s, st, plain_save_plan(st, f, name)) {
+        Ok(job) => job.known_warnings(),
+        Err(e) => vec![e.to_string()],
+    }
 }
 
 /// Whether File › Save writes `st` back over `name`, its own file, without asking first: the document has that file (it was not

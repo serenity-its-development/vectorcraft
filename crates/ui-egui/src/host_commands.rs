@@ -102,25 +102,27 @@ impl VectorcraftApp {
         vectorcraft_engine::cmd::fileio::bytes_of_a_save(&self.session, st, view.as_ref()).map_err(|e| e.to_string())
     }
 
-    /// The host's ask for an export, answered: the file's name and bytes. A document whose own file Save writes back
-    /// (`fileio::saves_back`) answers with those bytes under the host's own name ([`Self::host_export_bytes`]). A document opened
-    /// from a file Save does not write back (EPS and the other imports, a `.ai` file without the native document, a lossy read, a
-    /// converted or recovered document) answers with the native file Save As writes, named `<stem>.vectorcraft`: the host keeps it
-    /// as a NEW file beside the original, which is never written (oneos files/038, the import rule). Refused when no open document
-    /// is the host's file (it did not open, or the person saved it under another name), and when the save is more than one file.
-    pub fn host_export(&self, name: &str) -> Result<(String, Vec<u8>), String> {
+    /// The host's ask for an export, answered as `(name, bytes, losses)` (oneos files/044: auto-save writes only a format that loses
+    /// nothing). When a plain Save of the host's file loses nothing (`fileio::save_losses` is empty) it is those bytes under the host's
+    /// own name ([`Self::host_export_bytes`]). Otherwise - a format Vector only reads (EPS), a converted or recovered document, a lossy
+    /// read, or a format that does not keep everything a VectorCraft document holds (SVG, PDF) - it is the native file Save As writes,
+    /// `<stem>.vectorcraft`, with those losses named; the host keeps it as a NEW file beside the original. `keep_original`: the person
+    /// chose the host's own format and accepted the loss - that format (refused where Vector cannot write it), with the losses named.
+    /// Refused when no open document is the host's file (it did not open, or the person saved it under another name).
+    pub fn host_export(&self, name: &str, keep_original: bool) -> Result<(String, Vec<u8>, Vec<String>), String> {
         let docs = self.session.documents();
-        if docs.iter().any(|st| vectorcraft_engine::cmd::fileio::saves_back(st, name)) {
-            return self.host_export_bytes(name).map(|bytes| (name.to_string(), bytes));
-        }
         let st = docs
             .iter()
             .find(|st| st.path.as_deref() == Some(name))
             // An import has no file of its own until it is saved; one saved under another name is not the host's file any more.
             .or_else(|| docs.iter().find(|st| st.path.is_none() && (st.imported_from.as_deref() == Some(name) || docs.len() == 1)))
             .ok_or_else(|| format!("no open document is {name}"))?;
+        let losses = vectorcraft_engine::cmd::fileio::save_losses(&self.session, st, name);
+        if keep_original || losses.is_empty() {
+            return self.host_export_bytes(name).map(|bytes| (name.to_string(), bytes, losses));
+        }
         let stem = vectorcraft_engine::cmd::fileio::file_stem(name);
-        vectorcraft_engine::cmd::fileio::bytes_of_a_native_save(&self.session, st, &stem).map_err(|e| e.to_string())
+        vectorcraft_engine::cmd::fileio::bytes_of_a_native_save(&self.session, st, &stem).map(|(n, b)| (n, b, losses)).map_err(|e| e.to_string())
     }
 
     /// Whether any document has changes the host does not hold yet.
@@ -344,6 +346,9 @@ mod tests {
             app.run_command_batch(&json!({"label": "Add", "steps": [{"name": "shape.ellipse", "args": {"x": 60, "y": 10, "width": 30, "height": 30}}]}))
                 .unwrap();
             let exported = app.host_export_bytes(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            // files/044: .ai carries the native document and loses nothing, so it auto-saves in place; svgz and PDF go native beside.
+            let (as_name, _, why) = app.host_export(name, false).unwrap();
+            assert_eq!(as_name == name, name == "logo.ai", "{name}: {why:?}");
             assert!(app.host_dirty(), "{name}: an export is not a save");
             assert!(written.borrow().is_empty(), "{name}: nothing went through the write service");
             app.run("file.save", json!({"modified": null})).unwrap();
@@ -362,9 +367,14 @@ mod tests {
         let services = crate::Services { download: Some(Box::new(|_: &str, _: &[u8]| Ok(()))), ..Default::default() };
         let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), services);
         app.open_host_file("logo.svg", svg).unwrap();
-        let (own, bytes) = app.host_export("logo.svg").unwrap();
-        assert_eq!(own, "logo.svg", "a file Save writes back keeps its own name");
-        assert!(String::from_utf8_lossy(&bytes).contains("<svg"), "and its own format");
+        // SVG does not keep everything a VectorCraft document holds, by Vector's own writer: the native file, the reason named.
+        let (own, _, why) = app.host_export("logo.svg", false).unwrap();
+        assert_eq!(own, "logo.vectorcraft");
+        assert!(why.iter().any(|w| w.contains("not everything a VectorCraft document holds")), "{why:?}");
+        // The person's choice of the older format: SVG, with the same reason named.
+        let (older, bytes, named) = app.host_export("logo.svg", true).unwrap();
+        assert_eq!((older.as_str(), &named), ("logo.svg", &why));
+        assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
         app.run_command_batch(&json!({"label": "Add", "steps": [{"name": "shape.ellipse", "args": {"x": 60, "y": 10, "width": 30, "height": 30}}]}))
             .unwrap();
         for flag in ["converted", "recovered"] {
@@ -374,7 +384,8 @@ mod tests {
                 st.recovered = flag == "recovered";
             }
             let revision = app.session.active().unwrap().revision;
-            let (name, native) = app.host_export("logo.svg").unwrap_or_else(|e| panic!("{flag}: {e}"));
+            let (name, native, why) = app.host_export("logo.svg", false).unwrap_or_else(|e| panic!("{flag}: {e}"));
+            assert!(!why.is_empty(), "{flag}: the reason is named");
             assert_eq!(name, "logo.vectorcraft", "{flag}: the native file, named beside the original");
             let mut back = VectorcraftApp::new(vectorcraft_engine::Session::new(), crate::Services::default());
             back.open_host_file("logo.vectorcraft", &native).unwrap_or_else(|e| panic!("{flag}: the native file opens: {e}"));
@@ -389,7 +400,7 @@ mod tests {
         }
         app.run("file.saveAs", json!({"path": "copy.svg", "options": {}})).unwrap();
         assert_eq!(app.session.active().unwrap().path.as_deref(), Some("copy.svg"));
-        assert!(app.host_export("logo.svg").is_err(), "saved under another name: nothing is exported in its place");
+        assert!(app.host_export("logo.svg", false).is_err(), "saved under another name: nothing is exported in its place");
     }
 
     #[test]
