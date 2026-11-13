@@ -81,6 +81,27 @@ impl VectorcraftApp {
         self.session.active().map(|st| st.uid)
     }
 
+    /// The bytes File › Save would write for the host's file `name`, as its document stands: the answer to the host's ask for an
+    /// export (auto-save, save on close). Nothing here is a save: the window and the document are only read (`&self`), so no text
+    /// being typed and no tool is committed, the document keeps its unsaved state, its history and its dates, nothing is shown or
+    /// journaled, and nothing goes through the write service. The format and its options are those of a plain Save of the host's
+    /// file (`fileio::bytes_of_a_save`), with the view a Save notes first (`io::remember_view`) when the window shows that document.
+    ///
+    /// Refused when no open document is the host's file: it did not open, the person saved it under another name, or it was opened
+    /// from a format Save does not write back (EPS and every other import, a `.ai` file without the native document, a template, a
+    /// PDF opened in part), which is never exported as another format. Refused too where a Save would ask first (see there).
+    pub fn host_export_bytes(&self, name: &str) -> Result<Vec<u8>, String> {
+        let st = self.session.documents().iter().find(|st| st.path.as_deref() == Some(name)).ok_or_else(|| format!("no open document is {name}"))?;
+        let shown = self.session.active().is_some_and(|active| active.uid == st.uid);
+        let view = self.view().filter(|v| shown && v.fitted).map(|v| vectorcraft_doc::SavedView {
+            name: String::new(),
+            center: v.center,
+            zoom: v.zoom,
+            rotation: v.rotation,
+        });
+        vectorcraft_engine::cmd::fileio::bytes_of_a_save(&self.session, st, view.as_ref()).map_err(|e| e.to_string())
+    }
+
     /// Whether any document has changes the host does not hold yet.
     pub fn host_dirty(&self) -> bool {
         self.session.documents().iter().any(|d| d.is_dirty())
@@ -220,6 +241,60 @@ mod tests {
         assert!(text.contains("<svg"), "{text}");
         drop(writes);
         assert!(!app.host_dirty(), "saved: the host holds it");
+    }
+
+    /// The host's ask for the bytes (`craft:export`) is never a save: the bytes are what Save would write, and the document is as
+    /// it was (unsaved, same revision, same history, nothing written, journaled or shown).
+    #[test]
+    fn an_export_for_the_host_is_the_bytes_of_a_save_and_leaves_the_document_unsaved_and_unchanged() {
+        let written: Rc<RefCell<Vec<(String, Vec<u8>)>>> = Rc::default();
+        let sink = written.clone();
+        let services = crate::Services {
+            download: Some(Box::new(move |name: &str, bytes: &[u8]| {
+                sink.borrow_mut().push((name.to_string(), bytes.to_vec()));
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), services);
+        assert!(app.host_export_bytes("logo.svg").is_err(), "nothing is open yet");
+        let svg =
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect x="5" y="5" width="40" height="30" fill="#0000ff"/></svg>"##;
+        app.open_host_file("logo.svg", svg).unwrap();
+        let opened = app.host_export_bytes("logo.svg").unwrap();
+        app.run_command_batch(&json!({"label": "Add", "steps": [{"name": "shape.ellipse", "args": {"x": 60, "y": 10, "width": 30, "height": 30}}]}))
+            .unwrap();
+        assert!(app.host_dirty());
+        assert!(app.host_export_bytes("other.svg").is_err(), "only the host's own file is exported");
+
+        let before = {
+            let st = app.session.active().unwrap();
+            (st.doc.clone(), st.revision, st.path.clone(), st.format, st.view.clone(), st.history.undo.len(), st.history.redo.len())
+        };
+        let (journal, status, dialog) = (app.session.journal.len(), app.ui.status.clone(), app.ui.dialog.is_some());
+        let first = app.host_export_bytes("logo.svg").unwrap();
+        let second = app.host_export_bytes("logo.svg").unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("<svg"), "the host's file's own format");
+        assert_ne!(first, opened, "with the work not saved yet");
+        assert_eq!(first, second, "asked twice, the same bytes");
+
+        let st = app.session.active().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&st.doc, &before.0), "the very same document: no date was stamped on it");
+        assert_eq!((st.revision, st.path.clone(), st.format, st.view.clone()), (before.1, before.2.clone(), before.3, before.4.clone()));
+        assert_eq!((st.history.undo.len(), st.history.redo.len()), (before.5, before.6), "no step was added to the history");
+        assert!(app.host_dirty(), "an export is not a save: the work is still unsaved");
+        assert_eq!((app.session.journal.len(), app.ui.status.clone(), app.ui.dialog.is_some()), (journal, status, dialog));
+        assert!(written.borrow().is_empty(), "nothing went through the write service");
+
+        // The person's Save of the same document writes exactly those bytes (`modified: null`: no clock, as in the browser).
+        app.run("file.save", json!({"modified": null})).unwrap();
+        assert_eq!(written.borrow().as_slice(), &[("logo.svg".to_string(), first)]);
+        assert!(!app.host_dirty());
+
+        // Saved under another name, no open document is the host's file any more: nothing is exported in its place.
+        app.run("file.saveAs", json!({"path": "copy.svg", "options": {}})).unwrap();
+        assert_eq!(app.session.active().unwrap().path.as_deref(), Some("copy.svg"));
+        assert!(app.host_export_bytes("logo.svg").is_err());
     }
 
     #[test]

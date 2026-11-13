@@ -495,7 +495,7 @@ fn host_before(framed: &Framed, handover: &mut Handover, app: &mut VectorcraftAp
     }
 }
 
-/// After the app's own pass: the hand-over and the unsaved flag.
+/// After the app's own pass: the hand-over, the host's asks for the bytes and the unsaved flag.
 fn host_after(framed: &Framed, handover: &mut Handover, app: &mut VectorcraftApp, ctx: &egui::Context) {
     let shown = app.shown_document();
     let wanted = handover.state.after(&framed.bridge, shown, |view| {
@@ -510,6 +510,18 @@ fn host_after(framed: &Framed, handover: &mut Handover, app: &mut VectorcraftApp
             });
         }
     });
+    // The host's asks for the bytes: the drawing as it stands, with nothing committed, stamped or marked saved.
+    for request in framed.bridge.take_exports() {
+        let name = framed.bridge.opened_name();
+        match app.host_export_bytes(&name) {
+            Ok(bytes) => {
+                if let Err(e) = framed.bridge.post_export(&bytes, request) {
+                    log::warn!("Vector: the export could not be handed to the host: {e}");
+                }
+            }
+            Err(e) => log::warn!("Vector: {name} was not exported: {e}"),
+        }
+    }
     (handover.dirty)(app.host_dirty());
     if wanted {
         ctx.request_repaint();

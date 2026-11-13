@@ -675,6 +675,47 @@ fn job_for_stamped(s: &Session, st: &DocState, plan: SavePlan, stamped: Option<i
     Ok(SaveJob { plan, doc, params, snapshot, source: st.doc.clone(), stamped, boards })
 }
 
+/// The bytes File › Save would write over `st`'s own file, as `st` stands (any open document of
+/// `s`), for a caller that keeps the file itself (the OneOS host's export: auto-save, save on
+/// close). Nothing here is a save: `s` and `st` are only read, so nothing is committed, stamped
+/// with a date, journaled or marked saved, and nothing is written. `view` is the view a Save would
+/// first note on the document (a native file reopens at it); `None`: the one it has.
+///
+/// It is refused, where a Save would ask the person instead of writing, when the document has no
+/// file of its own in a format Save writes (never saved; opened from a format that is only
+/// imported, such as EPS or a `.ai` file without the native document; converted; recovered) and
+/// when reading its file left things out (writing over it loses them for good); and when the save
+/// is more than the one file (an SVG's linked images, a file per artboard).
+pub fn bytes_of_a_save(s: &Session, st: &DocState, view: Option<&vectorcraft_doc::SavedView>) -> Result<Vec<u8>> {
+    let cmd = SaveMode::Save.command();
+    let Some(path) = st.path.clone().filter(|_| !st.converted && !st.recovered) else {
+        return Err(bad(cmd, "the document has no file of its own that Save writes without asking"));
+    };
+    let format = checked(cmd, st.format)?;
+    super::check_not_lossy_overwrite(st, &path, &Value::Null, cmd)?;
+    let plan = SavePlan {
+        mode: SaveMode::Save,
+        format,
+        options: remembered_save_options(st),
+        name: format!("{}.{}", file_stem(&path), format.extensions[0]),
+        folder: parent_folder(&path),
+        path: Some(path.clone()),
+        modified: None,
+        notes: Vec::new(),
+    };
+    let mut job = job_for(s, st, plan)?;
+    if let Some(view) = view.filter(|v| is_native(format) && job.doc.last_view.as_ref() != Some(*v)) {
+        // A copy when the document is shared with `st`: `st` keeps the view it has.
+        Arc::make_mut(&mut job.doc).last_view = Some(view.clone());
+    }
+    let mut enc = job.encode()?;
+    if enc.files.len() != 1 || !enc.linked.is_empty() || !enc.maps.is_empty() {
+        let n = enc.named(&job.doc, &path).len();
+        return Err(bad(cmd, format!("a save of {path} writes {n} files, not the one file")));
+    }
+    Ok(enc.files.swap_remove(0).1)
+}
+
 impl SaveJob {
     pub fn plan(&self) -> &SavePlan {
         &self.plan
